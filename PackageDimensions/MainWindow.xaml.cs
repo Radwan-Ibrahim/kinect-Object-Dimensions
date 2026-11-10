@@ -1,78 +1,123 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using Microsoft.Kinect;
-using System.Linq;
-using System.Collections.Generic;
-using System.Threading.Tasks;
-
-
 
 namespace PackageDimensions
 {
-
     /// <summary>
-    /// Interaction logic for MainWindow
+    /// Main window of the Package Dimensions application.
+    /// Reads depth frames from a Kinect v2 sensor, compares them with a calibrated
+    /// background frame (the empty surface) and estimates the width, height and depth
+    /// of the object placed inside the calibration area.
     /// </summary>
     public partial class MainWindow : Window, INotifyPropertyChanged
     {
+        #region Constants
+
         /// <summary>
-        /// Map depth range to byte range
+        /// Divisor that maps a depth value (0–8000 mm) into a grey-scale byte (0–255).
         /// </summary>
         private const int MapDepthToByte = 8000 / 256;
 
+        #endregion
+
+        #region Sensor fields
+
         /// <summary>
-        /// Active Kinect sensor
+        /// Active Kinect sensor.
         /// </summary>
         private KinectSensor kinectSensor = null;
 
         /// <summary>
-        /// Reader for depth frames
+        /// Reader for depth frames.
         /// </summary>
         private DepthFrameReader depthFrameReader = null;
 
         /// <summary>
-        /// Description of the data contained in the depth frame
+        /// Description of the data contained in the depth frame (512 x 424 for Kinect v2).
         /// </summary>
         private FrameDescription depthFrameDescription = null;
 
+        #endregion
+
+        #region Display buffers
+
         /// <summary>
-        /// Bitmap to display
+        /// Bitmaps bound to the UI: live scene, calibrated background and object difference.
         /// </summary>
         private WriteableBitmap PackagedepthBitmap = null;
         private WriteableBitmap CalibrationdepthBitmap = null;
         private WriteableBitmap DifferencedepthBitmap = null;
 
         /// <summary>
-        /// Intermediate storage for frame data converted to color
+        /// Grey-scale pixel buffers written into the bitmaps above.
         /// </summary>
         private byte[] CalibrationdepthPixels = null;
         private byte[] PackagedepthPixels = null;
         private byte[] DiffernecedepthPixels = null;
 
+        #endregion
+
+        #region Depth data and results
+
+        /// <summary>
+        /// Raw filtered depth (mm) of the current frame.
+        /// </summary>
         ushort[] PackageFrameData;
+
+        /// <summary>
+        /// Raw filtered depth (mm) of the background captured during calibration.
+        /// </summary>
         ushort[] CalibrationFrameData;
+
+        /// <summary>
+        /// Per-pixel height above the background (mm): background minus current depth.
+        /// </summary>
         ushort[] DifferenceFrame;
 
+        /// <summary>
+        /// Measured object dimensions in centimetres.
+        /// </summary>
         int PackageDepth;
         int PackageWidth;
         int PackageHeight;
+
         /// <summary>
-        /// Current status text to display
+        /// Current status text to display.
         /// </summary>
         private string statusText = null;
 
+        #endregion
 
+        #region Calibration settings
+
+        /// <summary>
+        /// Size (in depth pixels) of the centred region of interest used for measuring.
+        /// </summary>
         int CalibrationWidth = 512;
         int CalibrationHeight = 424;
-        bool IsCalibrate;
+
         /// <summary>
-        /// Initializes a new instance of the MainWindow class.
+        /// When true, the next frame is stored as the calibration (background) frame.
+        /// </summary>
+        bool IsCalibrate;
+
+        #endregion
+
+        #region Constructor
+
+        /// <summary>
+        /// Initializes a new instance of the MainWindow class: opens the sensor,
+        /// allocates the frame buffers and wires the depth frame handler.
         /// </summary>
         public MainWindow()
         {
@@ -115,13 +160,17 @@ namespace PackageDimensions
             this.InitializeComponent();
         }
 
+        #endregion
+
+        #region Bindable properties
+
         /// <summary>
-        /// INotifyPropertyChangedPropertyChanged event to allow window controls to bind to changeable data
+        /// INotifyPropertyChanged event to allow window controls to bind to changeable data.
         /// </summary>
         public event PropertyChangedEventHandler PropertyChanged;
 
         /// <summary>
-        /// Gets the bitmap to display
+        /// Gets the live (filtered) depth image of the scene.
         /// </summary>
         public ImageSource PackageImageSource
         {
@@ -130,6 +179,10 @@ namespace PackageDimensions
                 return this.PackagedepthBitmap;
             }
         }
+
+        /// <summary>
+        /// Gets the calibrated background depth image.
+        /// </summary>
         public ImageSource CalibrationImageSource
         {
             get
@@ -138,6 +191,9 @@ namespace PackageDimensions
             }
         }
 
+        /// <summary>
+        /// Gets the difference image (object only) with the detected bounding box.
+        /// </summary>
         public ImageSource DifferenceImageSource
         {
             get
@@ -171,8 +227,12 @@ namespace PackageDimensions
             }
         }
 
+        #endregion
+
+        #region Window lifecycle
+
         /// <summary>
-        /// Execute shutdown tasks
+        /// Execute shutdown tasks: release the frame reader and close the sensor.
         /// </summary>
         /// <param name="sender">object sending the event</param>
         /// <param name="e">event arguments</param>
@@ -192,10 +252,13 @@ namespace PackageDimensions
             }
         }
 
+        #endregion
 
+        #region Depth frame processing
 
         /// <summary>
-        /// Handles the depth frame data arriving from the sensor
+        /// Handles the depth frame data arriving from the sensor (~30 fps).
+        /// Validates the buffer, processes it and refreshes the UI.
         /// </summary>
         /// <param name="sender">object sending the event</param>
         /// <param name="e">event arguments</param>
@@ -231,14 +294,16 @@ namespace PackageDimensions
 
             if (depthFrameProcessed)
                 this.RenderDepthPixels();
-
         }
 
         /// <summary>
-        /// Directly accesses the underlying image buffer of the DepthFrame to 
-        /// create a displayable bitmap.
-        /// This function requires the /unsafe compiler option as we make use of direct
-        /// access to the native memory pointed to by the depthFrameData pointer.
+        /// Core measurement pipeline. Reads the raw 16-bit depth buffer and either:
+        /// <list type="bullet">
+        /// <item><description>Calibration mode: stores the frame as the background reference.</description></item>
+        /// <item><description>Measurement mode: subtracts the frame from the background, locates the
+        /// object's bounding box and converts it into real-world dimensions (cm).</description></item>
+        /// </list>
+        /// Requires the /unsafe compiler option because it reads native memory directly.
         /// </summary>
         /// <param name="depthFrameData">Pointer to the DepthFrame image data</param>
         /// <param name="depthFrameDataSize">Size of the DepthFrame image data</param>
@@ -246,37 +311,45 @@ namespace PackageDimensions
         /// <param name="maxDepth">The maximum reliable depth value for the frame</param>
         private unsafe void ProcessDepthFrameData(IntPtr depthFrameData, uint depthFrameDataSize, ushort minDepth, ushort maxDepth)
         {
-
+            // Region of interest (ROI): a CalibrationWidth x CalibrationHeight rectangle centred in the frame
             int X1 = (depthFrameDescription.Width - CalibrationWidth) / 2;
             int X2 = depthFrameDescription.Width - X1;
             int Y1 = (depthFrameDescription.Height - CalibrationHeight) / 2;
             int Y2 = depthFrameDescription.Height - Y1;
-            if (IsCalibrate||CalibrationCheckBox.IsChecked.Value)
+
+            if (IsCalibrate || CalibrationCheckBox.IsChecked.Value)
             {
+                // ===== Step 1: Calibration - capture the background (empty surface) =====
+
                 // depth frame data is a 16 bit value
                 CalibrationFrameData = new ushort[(depthFrameDataSize / this.depthFrameDescription.BytesPerPixel)]; // (ushort*)depthFrameData;
+
                 // convert depth to a visual representation
                 for (int i = 0; i < (int)(depthFrameDataSize / this.depthFrameDescription.BytesPerPixel); ++i)
                 {
-                    // Get the depth for this pixel
-
+                    // Convert the linear buffer index into (column, row) coordinates
                     int ColumnIdex = i % depthFrameDescription.Width;
                     int RowIndex = (i - ColumnIdex) / depthFrameDescription.Width;
 
+                    // Keep only depths inside the 0.5 m - 4 m working range and inside the ROI
                     ushort depth = ((ushort*)depthFrameData)[i];
                     if (depth < 500 || depth > 4000 || ColumnIdex < X1 || ColumnIdex > X2 || RowIndex < Y1 || RowIndex > Y2)
                         depth = 0;
 
-
                     CalibrationFrameData[i] = depth;
+
                     // To convert to a byte, we're mapping the depth value to the byte range.
                     // Values outside the reliable depth range are mapped to 0 (black).
                     this.CalibrationdepthPixels[i] = (byte)(depth >= minDepth && depth <= maxDepth ? (depth / MapDepthToByte) : 0);
                 }
+
+                // One-shot calibration done (the check box keeps calibrating continuously)
                 IsCalibrate = false;
             }
             else
             {
+                // ===== Step 2: Measurement - subtract the current frame from the background =====
+
                 // depth frame data is a 16 bit value
                 PackageFrameData = new ushort[(depthFrameDataSize / this.depthFrameDescription.BytesPerPixel)];
                 DifferenceFrame = new ushort[(depthFrameDataSize / this.depthFrameDescription.BytesPerPixel)];
@@ -284,19 +357,21 @@ namespace PackageDimensions
                 // convert depth to a visual representation
                 for (int i = 0; i < (int)(depthFrameDataSize / this.depthFrameDescription.BytesPerPixel); ++i)
                 {
+                    // Convert the linear buffer index into (column, row) coordinates
                     int ColumnIdex = i % depthFrameDescription.Width;
                     int RowIndex = (i - ColumnIdex) / depthFrameDescription.Width;
-                    // Get the depth for this pixel
+
+                    // Keep only depths inside the 0.5 m - 4 m working range and inside the ROI
                     ushort depth = ((ushort*)depthFrameData)[i];
                     if (depth < 500 || depth > 4000 || ColumnIdex < X1 || ColumnIdex > X2 || RowIndex < Y1 || RowIndex > Y2)
                         depth = 0;
                     PackageFrameData[i] = depth;
+
                     // To convert to a byte, we're mapping the depth value to the byte range.
                     // Values outside the reliable depth range are mapped to 0 (black).
                     this.PackagedepthPixels[i] = (byte)(depth >= minDepth && depth <= maxDepth ? (depth / MapDepthToByte) : 0);
 
-
-                    //Difference 
+                    // Difference = how far (mm) this pixel rises above the calibrated background
                     if (PackageFrameData != null && CalibrationFrameData != null)
                     {
                         int Difference;
@@ -305,22 +380,26 @@ namespace PackageDimensions
                         else
                             Difference = (CalibrationFrameData[i] - PackageFrameData[i]);
 
-                        // remove difference smaller than 100
+                        // remove difference smaller than 100 mm (sensor noise)
                         Difference = (ushort)((Difference > 100) ? Difference : 0);
                         // var LayerDifference = (ushort)(Difference + Difference % 10);
                         DifferenceFrame[i] = (ushort)Difference;
+
+                        // Amplify x10 for visibility and clamp to the byte range
                         int differencePixel = (Difference / MapDepthToByte) * 10;
                         this.DiffernecedepthPixels[i] = (byte)((differencePixel > 255) ? 255 : differencePixel);
-
                     }
                 }
 
                 if (PackageFrameData != null && CalibrationFrameData != null)
                 {
+                    // ===== Step 3: Bounding box - first rows/columns with more than 10 object pixels =====
                     int TopY = 0;
                     int DownY = 0;
                     int RightX = 0;
                     int LeftX = 0;
+
+                    // Scan rows from the top and bottom edges simultaneously
                     for (int RowIndex = 0; RowIndex < depthFrameDescription.Height; RowIndex++)
                     {
                         int Topcount = 0;
@@ -335,8 +414,8 @@ namespace PackageDimensions
 
                             if (DifferenceFrame[DownIndex] > 0 && DownY == 0)
                                 DownCount++;
-
                         }
+
                         if (Topcount > 10 && TopY == 0)
                         {
                             TopY = RowIndex;
@@ -349,9 +428,9 @@ namespace PackageDimensions
                         }
                         if (DownY > 0 && TopY > 0)
                             break;
-
                     }
 
+                    // Scan columns from the left and right edges simultaneously
                     for (int ColumnIndex = 0; ColumnIndex < depthFrameDescription.Width; ColumnIndex++)
                     {
                         int Leftcount = 0;
@@ -366,8 +445,8 @@ namespace PackageDimensions
 
                             if (DifferenceFrame[RightIndex] > 0 && RightX == 0)
                                 RightCount++;
-
                         }
+
                         if (Leftcount > 10 && LeftX == 0)
                         {
                             LeftX = ColumnIndex;
@@ -380,10 +459,9 @@ namespace PackageDimensions
                         }
                         if (LeftX > 0 && RightX > 0)
                             break;
-
                     }
 
-
+                    // ===== Step 4: Draw the bounding box (white) on the difference image =====
                     for (int ColumnIndex = LeftX; ColumnIndex < RightX; ColumnIndex++)
                     {
                         var TopRowIndex = ColumnIndex + (TopY * depthFrameDescription.Width);
@@ -398,9 +476,11 @@ namespace PackageDimensions
                         var RightIndex = RightX + (RowIndex * depthFrameDescription.Width);
                         this.DiffernecedepthPixels[LeftIndex] = 255;
                         this.DiffernecedepthPixels[RightIndex] = 255;
-
                     }
 
+                    // ===== Step 5: Histograms inside the bounding box =====
+
+                    // Histogram of object heights above the background (mm -> pixel count)
                     SortedDictionary<ushort, int> DifferentDepthWeight = new SortedDictionary<ushort, int>();
                     for (int RowIndex = TopY; RowIndex < DownY; RowIndex++)
                     {
@@ -415,6 +495,7 @@ namespace PackageDimensions
                         }
                     }
 
+                    // Histogram of camera-to-surface distances, ignoring filtered (zero) pixels
                     SortedDictionary<ushort, int> DepthWeight = new SortedDictionary<ushort, int>();
                     for (int RowIndex = TopY; RowIndex < DownY; RowIndex++)
                     {
@@ -428,27 +509,29 @@ namespace PackageDimensions
                                 DepthWeight.Add(PackageFrameData[Index], 1);
                         }
                     }
+                    // Most frequent distance = camera to the object's top surface (mm)
                     int DepthFromCamera = 0;
                     if (DepthWeight.Count > 0)
                         DepthFromCamera = DepthWeight.OrderBy(p => p.Value).Last().Key;
 
+                    // ===== Step 6: Convert pixels to real-world dimensions (cm) =====
                     // Kinect has a depth image resolution of 512 x 424 pixels with a fov of 70.6 x 60 degrees resulting in an average of about 7 x 7 pixels per degree
+                    // Real size = 2 * D * tan(FOV / 2) * (pixel span / image size)
 
+                    // Depth: the largest height above background seen by more than 4 pixels
                     PackageDepth = (DifferentDepthWeight.LastOrDefault(p => p.Value > 4).Key) / 10;
                     PackageWidth = (int)(((2 * DepthFromCamera * Math.Tan(35.3 * Math.PI / 180) * (RightX - LeftX)) / depthFrameDescription.Width) / 10);
                     PackageHeight = (int)(((2 * DepthFromCamera * Math.Abs(Math.Tan(30 * Math.PI / 180)) * (DownY - TopY)) / depthFrameDescription.Height) / 10);
                 }
-
-
-
-
             }
-
-
         }
 
+        #endregion
+
+        #region Rendering
+
         /// <summary>
-        /// Renders color pixels into the writeableBitmap.
+        /// Writes the pixel buffers into the bound bitmaps and updates the dimension labels.
         /// </summary>
         private void RenderDepthPixels()
         {
@@ -469,8 +552,8 @@ namespace PackageDimensions
                 Depth.Text = PackageDepth.ToString();
                 Width.Text = PackageWidth.ToString();
                 Height.Text = PackageHeight.ToString();
-
             }
+
             if (CalibrationFrameData != null)
             {
                 this.CalibrationdepthBitmap.WritePixels(
@@ -479,11 +562,11 @@ namespace PackageDimensions
                    this.CalibrationdepthBitmap.PixelWidth,
                    0);
             }
-
-
-
-
         }
+
+        #endregion
+
+        #region Sensor and calibration UI handlers
 
         /// <summary>
         /// Handles the event which the sensor becomes unavailable (E.g. paused, closed, unplugged).
@@ -497,6 +580,9 @@ namespace PackageDimensions
                                                             : Properties.Resources.SensorNotAvailableStatusText;
         }
 
+        /// <summary>
+        /// Resizes the ROI width and the white rectangle overlay on the calibration image.
+        /// </summary>
         private void CalibrationWidth_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
         {
             if (CalibrationImage == null)
@@ -508,6 +594,9 @@ namespace PackageDimensions
             CalibrationRect.Margin = new Thickness(Left, CalibrationRect.Margin.Top, Right, CalibrationRect.Margin.Bottom);
         }
 
+        /// <summary>
+        /// Resizes the ROI height and the white rectangle overlay on the calibration image.
+        /// </summary>
         private void CalibrationHeightChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
         {
             if (CalibrationImage == null)
@@ -519,10 +608,14 @@ namespace PackageDimensions
             CalibrationRect.Margin = new Thickness(CalibrationRect.Margin.Left, Top, CalibrationRect.Margin.Right, Bottom);
         }
 
+        /// <summary>
+        /// Requests a one-shot calibration using the next depth frame.
+        /// </summary>
         private void Calibrate(object sender, RoutedEventArgs e)
         {
             IsCalibrate = true;
         }
 
+        #endregion
     }
 }

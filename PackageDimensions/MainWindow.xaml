@@ -20,6 +20,7 @@
                 <ColumnDefinition Width="2*" />
             </Grid.ColumnDefinitions>
 
+            <!-- Left panel: difference image with bounding box and measured dimensions -->
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
@@ -36,6 +37,7 @@
                         <Image Source="{Binding DifferenceImageSource}"
                                Stretch="UniformToFill" />
                     </Viewbox>
+                    <!-- Measured dimensions (cm) -->
                     <StackPanel>
                         <TextBlock FontSize="20">
                     <Run Text="Depth:"
@@ -60,6 +62,7 @@
                 </StackPanel>
             </Grid>
 
+            <!-- Right panel: calibration controls (ROI size, background capture) -->
             <Grid Grid.Column="1">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
@@ -92,6 +95,7 @@
                             SmallChange="1"
                             ValueChanged="CalibrationHeightChanged"
                             Margin="0 5 0 20" />
+                    <!-- Calibration preview with the ROI rectangle overlay -->
                     <Viewbox Grid.Column="0"
                              Grid.Row="1"
                              Margin="0 0"
@@ -115,6 +119,7 @@
                 </StackPanel>
             </Grid>
 
+            <!-- Raw depth preview (hidden, kept for debugging) -->
             <Viewbox Margin="5 0"
                      Grid.Column="1"
                      Grid.Row="1"
@@ -126,6 +131,7 @@
 
         </Grid>
 
+        <!-- Sensor status -->
         <StatusBar Grid.Row="2"
                    HorizontalAlignment="Stretch"
                    Name="statusBar"
